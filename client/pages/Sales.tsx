@@ -349,7 +349,9 @@ export default function Sales() {
       `${t("common.name")}: ${inv.clientName}`,
       `${t("common.email")}: ${inv.clientEmail}`,
       `${t("clients.type", "Type")}: ${t(`clients.${inv.clientType}`)}`,
-      `${t("sales.payment_method")}: ${t(`sales.${inv.paymentMethod}`)}`,
+      !inv.borrow
+        ? `${t("sales.payment_method")}: ${t(`sales.${inv.paymentMethod}`)}`
+        : "",
     ].join("\n");
 
     const detailsSection = [
@@ -449,20 +451,22 @@ export default function Sales() {
       "discountAmount",
       "total",
     ];
-    const rows = sortedInvoices.map((inv) => ({
-      invoiceNumber: inv.invoiceNumber,
-      date: new Date(inv.date).toISOString(),
-      clientName: inv.clientName,
-      clientEmail: inv.clientEmail,
-      employeeName: inv.employeeName || "",
-      status: inv.status,
-      paymentMethod: inv.paymentMethod,
-      subtotal: inv.subtotal,
-      taxRate: inv.taxRate,
-      taxAmount: inv.taxAmount,
-      discountAmount: inv.discountAmount,
-      total: inv.total,
-    }));
+    const rows = sortedInvoices
+      .filter((inv) => inv.status === "paid" || inv.borrow)
+      .map((inv) => ({
+        invoiceNumber: inv.invoiceNumber,
+        date: new Date(inv.date).toISOString(),
+        clientName: inv.clientName,
+        clientEmail: inv.clientEmail,
+        employeeName: inv.employeeName || "",
+        status: inv.status,
+        paymentMethod: inv.paymentMethod,
+        subtotal: inv.subtotal,
+        taxRate: inv.taxRate,
+        taxAmount: inv.taxAmount,
+        discountAmount: inv.discountAmount,
+        total: inv.total,
+      }));
     const csv = toCSV(rows, headers);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const today = new Date().toISOString().slice(0, 10);
@@ -482,6 +486,7 @@ export default function Sales() {
       t("common.status"),
     ];
     const rows = filteredInvoices
+      .filter((inv) => inv.status === "paid" || inv.borrow)
       .slice()
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
       .map(
@@ -659,8 +664,9 @@ export default function Sales() {
           ? `${t("sales.last_month")} (${dateStr})`
           : `${t("finance.last_12_months", "Last 12 Months")} (${dateStr})`;
 
-    // Include all invoices for the report (no status filtering)
-    const sorted = data
+    // Include only paid or borrow invoices in the report
+    const included = data.filter((i) => i.status === "paid" || i.borrow);
+    const sorted = included
       .slice()
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
@@ -846,10 +852,12 @@ export default function Sales() {
     const { start, end, label } = getPeriodRange(pdfPeriod);
 
     // Export should ignore table search/status filters; use full dataset
-    const data = invoices.filter((i) => {
-      const d = new Date(i.date);
-      return d >= start && d <= end;
-    });
+    const data = invoices
+      .filter((i) => {
+        const d = new Date(i.date);
+        return d >= start && d <= end;
+      })
+      .filter((i) => i.status === "paid" || i.borrow);
 
     const html = buildSalesReportHTML(pdfPeriod, label, data);
     closeExportLayers();
@@ -901,7 +909,7 @@ export default function Sales() {
                   <div class="row"><span>${t("common.name")}</span><span class="right">${inv.clientName}</span></div>
                   <div class="row"><span>${t("common.email")}</span><span class="right">${inv.clientEmail || "-"}</span></div>
                   <div class="row"><span>${t("clients.type", "Type")}</span><span class="right">${t(`clients.${inv.clientType}`)}</span></div>
-                  <div class="row"><span>${t("sales.payment_method")}</span><span class="right">${t(`sales.${inv.paymentMethod}`)}</span></div>
+                  ${!inv.borrow ? `<div class="row"><span>${t("sales.payment_method")}</span><span class="right">${t(`sales.${inv.paymentMethod}`)}</span></div>` : ""}
                 </div>
               </div>
               <div>
@@ -1084,7 +1092,14 @@ export default function Sales() {
     [filteredInvoices],
   );
 
-  const getStatusBadge = (status: string) => {
+  const getStatusBadge = (status: string, borrow?: boolean) => {
+    if (borrow) {
+      return (
+        <Badge variant="default" className="bg-purple-100 text-purple-800">
+          {t("finance.borrow", "Borrow")}
+        </Badge>
+      );
+    }
     switch (status) {
       case "draft":
         return (
@@ -1286,7 +1301,7 @@ export default function Sales() {
       taxAmount: Number(newInvoice.taxAmount ?? 0),
       discountAmount: Number(newInvoice.discountAmount ?? 0),
       total: Number(newInvoice.total ?? 0),
-      paymentMethod: newInvoice.paymentMethod || "cash",
+      paymentMethod: forBorrow ? null : newInvoice.paymentMethod || "cash",
       notes: newInvoice.notes || "",
       borrow: !!forBorrow,
       returnDate: forBorrow ? borrowReturnDate : undefined,
@@ -1801,7 +1816,14 @@ export default function Sales() {
                           id="for-borrow"
                           type="checkbox"
                           checked={forBorrow}
-                          onChange={(e) => setForBorrow(e.target.checked)}
+                          onChange={(e) => {
+                            setForBorrow(e.target.checked);
+                            if (e.target.checked)
+                              setNewInvoice({
+                                ...newInvoice,
+                                paymentMethod: undefined as any,
+                              });
+                          }}
                           className="h-4 w-4"
                         />
                         <span>{t("sales.for_borrow")}</span>
@@ -1895,38 +1917,40 @@ export default function Sales() {
 
                   {/* Payment */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="paymentMethod">
-                        {t("sales.payment_method")}
-                      </Label>
-                      <Select
-                        value={newInvoice.paymentMethod}
-                        onValueChange={(value) =>
-                          setNewInvoice({
-                            ...newInvoice,
-                            paymentMethod: value as any,
-                          })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="cash">
-                            {t("sales.cash")}
-                          </SelectItem>
-                          <SelectItem value="card">
-                            {t("sales.card")}
-                          </SelectItem>
-                          <SelectItem value="bank_transfer">
-                            {t("sales.bank_transfer")}
-                          </SelectItem>
-                          <SelectItem value="credit">
-                            {t("sales.credit")}
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
+                    {!forBorrow && (
+                      <div className="space-y-2">
+                        <Label htmlFor="paymentMethod">
+                          {t("sales.payment_method")}
+                        </Label>
+                        <Select
+                          value={newInvoice.paymentMethod}
+                          onValueChange={(value) =>
+                            setNewInvoice({
+                              ...newInvoice,
+                              paymentMethod: value as any,
+                            })
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="cash">
+                              {t("sales.cash")}
+                            </SelectItem>
+                            <SelectItem value="card">
+                              {t("sales.card")}
+                            </SelectItem>
+                            <SelectItem value="bank_transfer">
+                              {t("sales.bank_transfer")}
+                            </SelectItem>
+                            <SelectItem value="credit">
+                              {t("sales.credit")}
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
                   </div>
 
                   {/* Add Item Section */}
@@ -2264,7 +2288,14 @@ export default function Sales() {
                           id="for-borrow"
                           type="checkbox"
                           checked={forBorrow}
-                          onChange={(e) => setForBorrow(e.target.checked)}
+                          onChange={(e) => {
+                            setForBorrow(e.target.checked);
+                            if (e.target.checked)
+                              setNewInvoice({
+                                ...newInvoice,
+                                paymentMethod: undefined as any,
+                              });
+                          }}
                           className="h-4 w-4"
                         />
                         <span>{t("sales.for_borrow")}</span>
@@ -2358,38 +2389,40 @@ export default function Sales() {
 
                   {/* Payment */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="paymentMethod">
-                        {t("sales.payment_method")}
-                      </Label>
-                      <Select
-                        value={newInvoice.paymentMethod}
-                        onValueChange={(value) =>
-                          setNewInvoice({
-                            ...newInvoice,
-                            paymentMethod: value as any,
-                          })
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="cash">
-                            {t("sales.cash")}
-                          </SelectItem>
-                          <SelectItem value="card">
-                            {t("sales.card")}
-                          </SelectItem>
-                          <SelectItem value="bank_transfer">
-                            {t("sales.bank_transfer")}
-                          </SelectItem>
-                          <SelectItem value="credit">
-                            {t("sales.credit")}
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
+                    {!forBorrow && (
+                      <div className="space-y-2">
+                        <Label htmlFor="paymentMethod">
+                          {t("sales.payment_method")}
+                        </Label>
+                        <Select
+                          value={newInvoice.paymentMethod}
+                          onValueChange={(value) =>
+                            setNewInvoice({
+                              ...newInvoice,
+                              paymentMethod: value as any,
+                            })
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="cash">
+                              {t("sales.cash")}
+                            </SelectItem>
+                            <SelectItem value="card">
+                              {t("sales.card")}
+                            </SelectItem>
+                            <SelectItem value="bank_transfer">
+                              {t("sales.bank_transfer")}
+                            </SelectItem>
+                            <SelectItem value="credit">
+                              {t("sales.credit")}
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    )}
                   </div>
 
                   {/* Add Item Section */}
@@ -2957,7 +2990,7 @@ export default function Sales() {
         <CardContent>
           <div className="hidden md:block">
             <div className="w-full overflow-x-auto">
-              <Table className="w-full sm:min-w-0 [&_th]:px-4 [&_td]:px-4 md:[&_th]:px-6 md:[&_td]:px-6">
+              <Table className="min-w-[720px] sm:min-w-0 table-fixed [&_th]:px-4 [&_td]:px-4 md:[&_th]:px-6 md:[&_td]:px-6">
                 <TableHeader>
                   <TableRow>
                     <TableHead>{t("sales.invoice_number")}</TableHead>
@@ -2966,7 +2999,9 @@ export default function Sales() {
                     <TableHead>{t("common.date")}</TableHead>
                     <TableHead>{t("common.amount")}</TableHead>
                     <TableHead>{t("common.status")}</TableHead>
-                    <TableHead>{t("common.actions")}</TableHead>
+                    <TableHead className="w-[140px]">
+                      {t("common.actions")}
+                    </TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -3031,13 +3066,17 @@ export default function Sales() {
                         <div className="font-medium">
                           ${invoice.total.toFixed(2)}
                         </div>
-                        <div className="text-sm text-muted-foreground">
-                          {t(`sales.${invoice.paymentMethod}`)}
-                        </div>
+                        {!invoice.borrow && (
+                          <div className="text-sm text-muted-foreground">
+                            {t(`sales.${invoice.paymentMethod}`)}
+                          </div>
+                        )}
                       </TableCell>
-                      <TableCell>{getStatusBadge(invoice.status)}</TableCell>
                       <TableCell>
-                        <div className="flex gap-1">
+                        {getStatusBadge(invoice.status, invoice.borrow)}
+                      </TableCell>
+                      <TableCell className="w-[140px]">
+                        <div className="flex gap-1 justify-end">
                           <Button
                             variant="outline"
                             size="sm"
@@ -3052,10 +3091,15 @@ export default function Sales() {
                             variant="outline"
                             size="sm"
                             onClick={() => {
+                              buildInvoicePDF(invoice);
                               toast({
-                                title: "Invoice downloaded",
-                                description:
-                                  "Invoice PDF has been generated and downloaded.",
+                                title: t(
+                                  "sales.toast.invoice_downloaded_title",
+                                ),
+                                description: t(
+                                  "sales.toast.invoice_downloaded_desc_number",
+                                  { number: invoice.invoiceNumber },
+                                ),
                               });
                             }}
                           >
@@ -3132,7 +3176,7 @@ export default function Sales() {
                       {invoice.invoiceNumber}
                     </div>
                   </div>
-                  {getStatusBadge(invoice.status)}
+                  {getStatusBadge(invoice.status, invoice.borrow)}
                 </div>
                 <div className="mt-3">
                   <div className="font-medium">{invoice.clientName}</div>
@@ -3273,7 +3317,10 @@ export default function Sales() {
                     </div>
                     <div>
                       {t("common.status")}:{" "}
-                      {getStatusBadge(selectedInvoice.status)}
+                      {getStatusBadge(
+                        selectedInvoice.status,
+                        selectedInvoice.borrow,
+                      )}
                     </div>
                   </div>
                 </div>
@@ -3287,10 +3334,12 @@ export default function Sales() {
                     <div className="capitalize">
                       {t(`clients.${selectedInvoice.clientType}`)}
                     </div>
-                    <div className="capitalize">
-                      {t("sales.payment")}:{" "}
-                      {t(`sales.${selectedInvoice.paymentMethod}`)}
-                    </div>
+                    {!selectedInvoice.borrow && (
+                      <div className="capitalize">
+                        {t("sales.payment")}:{" "}
+                        {t(`sales.${selectedInvoice.paymentMethod}`)}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
